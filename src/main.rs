@@ -1,6 +1,5 @@
-use std::fmt::{Display, Formatter, Result};
 use std::collections::{VecDeque, HashMap};
-use std::ops::{Index, IndexMut};
+use std::convert::TryFrom;
 
 #[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)]
 enum LaserSource {Down, Right}
@@ -29,17 +28,97 @@ impl From<&Cell> for char {
 type MapRepr = Vec<Cell>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct Map {
-    mp: MapRepr,
+struct MapMeta {
     laser_poss: Vec<(usize, (isize, isize, isize))>,
     width: usize,
     height: usize,
+    player_x: usize,
+    player_y: usize,
 }
 
-impl Map {
+impl MapMeta {
+    fn from(objects: &[(Cell, &[(usize, usize)])], player_pos: (usize, usize)) -> (MapMeta, MapRepr) {
+        let (mx, my): (usize, usize) = objects.iter()
+            .flat_map(|(_, poss)| poss.iter().cloned())
+            .map(|(x, y)| (x + 1, y + 1))
+            .reduce(|(mx, my), (x, y)| (mx.max(x), my.max(y)))
+            .unwrap();
+        let laser_poss = objects.iter()
+            .filter_map(|(c, ps)| match c {
+                Cell::LaserSource(x) => Some((x, ps)),
+                _ => None
+            })
+            .flat_map(|(c, ps)| ps.iter()
+                .map(|(x, y)| y * mx + x)
+                .map(move |p| (p, match c {
+                    LaserSource::Down => (0, -1, -(mx as isize)),
+                    LaserSource::Right => (1, 0, 1),
+                })))
+            .collect();
+        let mut mp = vec![Cell::Space; mx * my];
+        let res = MapMeta {
+            width: mx,
+            height: my,
+            laser_poss: laser_poss,
+            player_x: player_pos.0,
+            player_y: player_pos.1,
+        };
+        objects.iter()
+            .for_each(|(obj, poss)|
+                poss.iter().for_each(|p| {
+                    mp[res.from_pair(p)] = *obj
+                })
+        );
+        mp[res.from_pair(&player_pos)] = Cell::Player;
+        (res, mp)
+    }
+
+    fn from_pair<I: Copy>(&self, (x, y): &(I, I)) -> usize where usize: TryFrom<I> {
+        let (ix, iy) = (usize::try_from(*x), usize::try_from(*y));
+        match ix {
+            Ok(ix) => match iy {
+                Ok(iy) => self.width * iy + ix,
+                _ => unreachable!()
+            },
+            _ => unreachable!()
+        }
+    }
+
+    fn fmt(&self, mp: &MapRepr) -> String {
+        let mut tmp = mp.clone();
+        self.draw_lasers(&mut tmp);
+        tmp.iter()
+            .map(char::from)
+            .collect::<Vec<_>>()
+            .chunks(self.width)
+            .map(|x| x.iter().fold(String::new(), |mut acc, b| {acc.push(*b); acc}))
+            .rev()
+            .fold(String::new(), |mut acc, b| {acc.push_str(&b); acc.push('\n'); acc})
+    }
+
     // TODO: change to in_map?
     fn not_in_map(&self, (x, y): (isize, isize)) -> bool {
         !((0..self.width as isize).contains(&x) && (0..self.height as isize).contains(&y))
+    }
+
+    fn is_player_dead(&self, mp: &MapRepr, (player_x, player_y): &(isize, isize)) -> bool {
+        for (i, (dx, dy, d)) in self.laser_poss.iter() {
+            let (mut kx, mut ky, mut k) = ((i % self.width) as isize, (i / self.width) as isize, *i as isize);
+            if kx != *player_x && ky != *player_y {
+                continue
+            }
+            while !self.not_in_map((kx, ky)) {
+                match mp[k as usize] {
+                    Cell::LaserSource(_) | Cell::Laser | Cell::Space => {}
+                    Cell::Player => return true,
+                    _ => {break;}
+                };
+                k += d;
+                kx += dx;
+                ky += dy;
+            }
+        }
+        false
     }
 
     fn draw_lasers(&self, mp: &mut MapRepr) {
@@ -47,7 +126,7 @@ impl Map {
         for (i, (dx, dy, d)) in self.laser_poss.iter() {
             let (mut kx, mut ky, mut k) = ((i % self.width) as isize, (i / self.width) as isize, *i as isize);
             while !self.not_in_map((kx, ky)) {
-                match mp[ky as usize * self.width + kx as usize] {
+                match mp[k as usize] {
                     Cell::LaserSource(_) | Cell::Laser => {}
                     Cell::Space => {to_update.push(k as usize)}
                     _ => {break;}
@@ -60,20 +139,13 @@ impl Map {
         to_update.iter().for_each(|k| mp[*k] = Cell::Laser)
     }
 
-    fn bfs(&self, max_turns: u32, v_start: (isize, isize)) -> Option<Vec<MapRepr>> {
+    fn bfs(&self, max_turns: u32, v_start: (isize, isize), mp: MapRepr) -> Option<Vec<MapRepr>> {
         let mut visited = HashMap::new(); // from
         let mut queue: VecDeque<(MapRepr, (usize, isize, isize), MapRepr, u32)> = VecDeque::new();
-        {
-            let mp_vec = {
-                let mut tmp = self.mp.clone();
-                self.draw_lasers(&mut tmp);
-                tmp
-            };
-            queue.push_back((mp_vec.clone(), (v_start.1 as usize * self.width + v_start.0 as usize, v_start.0, v_start.1), mp_vec, 0));
-        }
+        queue.push_back((mp.clone(), (self.from_pair(&v_start), v_start.0, v_start.1), mp, 0));
         while !queue.is_empty() {
             let (strmap, (vi, v_x, v_y), p, sz) = queue.pop_front().unwrap();
-            if visited.contains_key(&strmap) {
+            if visited.contains_key(&strmap) || self.is_player_dead(&strmap, &(v_x, v_y)) {
                 continue
             }
             if !strmap.contains(&Cell::LeverOff) {
@@ -124,7 +196,6 @@ impl Map {
                                 };
                             }
                             replace(&mut tmp, to, Cell::Space, after_to, Cell::Cube);
-                            self.draw_lasers(&mut tmp);
                             tmp
                         };
                         (strmap_new, (vi, v_x, v_y))
@@ -155,83 +226,23 @@ fn replace(v: &mut MapRepr, p1: usize, c1: Cell, p2: usize, c2: Cell) {
     v[p2] = c2;
 }
 
-impl From<&[(Cell, &[(usize, usize)])]> for Map {
-    fn from(objects: &[(Cell, &[(usize, usize)])]) -> Map {
-        let (mx, my): (usize, usize) = objects.iter()
-            .flat_map(|(_, poss)| poss.iter().cloned())
-            .map(|(x, y)| (x + 1, y + 1))
-            .reduce(|(mx, my), (x, y)| (mx.max(x), my.max(y)))
-            .unwrap();
-        let laser_poss = objects.iter()
-            .filter_map(|(c, ps)| match c {
-                Cell::LaserSource(x) => Some((x, ps)),
-                _ => None
-            })
-            .flat_map(|(c, ps)| ps.iter()
-                .map(|(x, y)| y * mx + x)
-                .map(move |p| (p, match c {
-                    LaserSource::Down => (0, -1, -(mx as isize)),
-                    LaserSource::Right => (1, 0, 1),
-                })))
-            .collect();
-        let mut res = Map {
-            mp: vec![Cell::Space; mx * my],
-            width: mx,
-            height: my,
-            laser_poss: laser_poss
-        };
-        objects.iter()
-            .for_each(|(obj, poss)|
-                poss.iter().for_each(|p| {
-                    res[*p] = *obj
-                })
-        );
-        res
-    }
-}
-
-impl Index<(usize, usize)> for Map {
-    type Output = Cell;
-    fn index(&self, (x, y): (usize, usize)) -> &Cell {
-        &self.mp[y * self.width + x]
-    }
-}
-
-impl IndexMut<(usize, usize)> for Map {
-    fn index_mut(&mut self, (x, y): (usize, usize)) -> &mut Cell {
-        &mut self.mp[y * self.width + x]
-    }
-}
-
-impl Display for Map {
-    fn fmt(&self, fmt: &mut Formatter) -> Result {
-        let mut tmp = self.mp.clone();
-        self.draw_lasers(&mut tmp);
-        fmt.write_str(&tmp.iter()
-            .map(char::from)
-            .collect::<Vec<_>>()
-            .chunks(self.width)
-            .map(|x| x.iter().fold(String::new(), |mut acc, b| {acc.push(*b); acc}))
-            .rev()
-            .fold(String::new(), |mut acc, b| {acc.push_str(&b); acc.push('\n'); acc}))
-    }
-}
-
 fn main() {
     let player_pos = (7, 0);
     let max_turns = 49;
-    let map: Map = Map::from(&[
+    let (map_meta, map_repr) = MapMeta::from(&[
         (Cell::Cube, &[(1, 3), (5, 2), (7, 1), (7, 2), (7, 3)][..]),
         (Cell::Wall, &[(0, 1), (1, 1), (2, 0), (3, 0), (4, 0), (5, 0), (8, 4), (7, 4), (7, 5), (1, 5), (0, 4)][..]),
         (Cell::LaserSource(LaserSource::Down), &[(2, 5), (3, 5), (6, 5)][..]),
         (Cell::LaserSource(LaserSource::Right), &[(3, 4)][..]),
         (Cell::LeverOff, &[(1, 4), (5, 5)][..]),
-        (Cell::Player, &[player_pos][..]),
-    ][..]);
+    ][..], player_pos);
 
-    println!("{}", map);
-    let solution = {map.bfs(max_turns, (player_pos.0 as isize, player_pos.1 as isize)).unwrap()};
-    solution.iter().rev().for_each(|state|
-        println!("{}", Map { mp: state.clone(), width: map.width, height: map.height, laser_poss: map.laser_poss.clone() })
-    );
+    println!("Starting position:\n{}", map_meta.fmt(&map_repr));
+    match map_meta.bfs(max_turns, (player_pos.0 as isize, player_pos.1 as isize), map_repr) {
+        Some(solution) => solution.iter().rev().for_each(|state| {
+            println!("=======================");
+            print!("{}", map_meta.fmt(state));
+        }),
+        None => println!("Solution was not found :("),
+    }
 }
