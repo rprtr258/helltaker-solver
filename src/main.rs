@@ -100,21 +100,21 @@ impl MapMeta {
         !((0..self.width as isize).contains(&x) && (0..self.height as isize).contains(&y))
     }
 
-    fn is_player_dead(&self, mp: &MapRepr, (player_x, player_y): &(isize, isize)) -> bool {
+    fn is_player_dead(&self, mp: &MapRepr, player_pos: &(isize, isize)) -> bool {
         for (i, (dx, dy, d)) in self.laser_poss.iter() {
             let (mut kx, mut ky, mut k) = ((i % self.width) as isize, (i / self.width) as isize, *i as isize);
-            if kx != *player_x && ky != *player_y {
-                continue
-            }
-            while !self.not_in_map((kx, ky)) {
-                match mp[k as usize] {
-                    Cell::LaserSource(_) | Cell::Laser | Cell::Space => {}
-                    Cell::Player => return true,
-                    _ => {break;}
-                };
-                k += d;
-                kx += dx;
-                ky += dy;
+            match *player_pos {
+                (x, y) if kx != x && ky != y => continue,
+                _ => while !self.not_in_map((kx, ky)) {
+                    match mp[k as usize] {
+                        Cell::LaserSource(_) | Cell::Laser | Cell::Space => {}
+                        Cell::Player => return true,
+                        _ => break,
+                    };
+                    k += d;
+                    kx += dx;
+                    ky += dy;
+                }
             }
         }
         false
@@ -124,11 +124,14 @@ impl MapMeta {
         for (i, (dx, dy, d)) in self.laser_poss.iter() {
             let (k0, times) = {
                 let (kx, ky) = ((i % self.width) as isize, (i / self.width) as isize);
-                (*i as isize, if *dx != 0 {
-                    if *dx < 0 {kx + 1} else {self.width as isize - kx + 1}
-                } else {
-                    if *dy < 0 {ky + 1} else {self.height as isize - ky + 1}
-                })
+                (*i as isize, match *dx {
+                    0 => match *dy {
+                        _dy if _dy < 0 => ky,
+                        _dy => self.height as isize - ky,
+                    }
+                    _dx if _dx < 0 => kx,
+                    _dx => self.width as isize - kx,
+                } + 1)
             };
             for k in (0..times).into_iter()
                 .map(|x| k0 + d * x)
